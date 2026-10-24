@@ -1,6 +1,54 @@
 #import "Basic";
 #import "String";
 
+#if OS == .WINDOWS {
+    Windows :: #import "Windows";
+    #import "tbx/utf";
+}
+
+// Writes a new file without ever replacing an existing path. Checking
+// file_exists before write_entire_file is not sufficient: another process can
+// create the path between those two operations, causing its file to be
+// overwritten. The OS-exclusive create operation makes that check and create
+// atomic; false is returned if the path already exists or the write fails.
+write_entire_file_if_absent :: (path: string, contents: string) -> bool {
+    #if OS_IS_UNIX {
+        fd := POSIX.open(temp_c_string(path), POSIX.O_WRONLY | POSIX.O_CREAT |
+             POSIX.O_EXCL, POSIX.DEFFILEMODE);
+        if fd < 0 return false;
+
+        written: int = 0;
+        while written < contents.count {
+            count := POSIX.write(fd, contents.data + written, cast(u64) (contents.count - written));
+            if count <= 0 break;
+            written += cast(int) count;
+        }
+
+        POSIX.close(fd);
+        if written == contents.count return true;
+        POSIX.unlink(temp_c_string(path));
+        return false;
+    } else #if OS == .WINDOWS {
+        path_utf16, converted := utf8_to_utf16(path,, allocator=temp);
+        if !converted return false;
+
+        handle := Windows.CreateFileW(path_utf16.data,
+            Windows.GENERIC_WRITE, Windows.FILE_SHARE_READ, null,
+            Windows.CREATE_NEW, Windows.FILE_ATTRIBUTE_NORMAL, null);
+        if handle == Windows.INVALID_HANDLE_VALUE return false;
+
+        written: u32;
+        success := contents.count <= 0xffffffff &&
+            Windows.WriteFile(handle, contents.data, cast(u32) contents.count, *written, null) != 0 &&
+            written == contents.count;
+        Windows.CloseHandle(handle);
+        if !success Windows.DeleteFileW(path_utf16.data);
+        return success;
+    } else {
+        return false;
+    }
+}
+
 // File_Utilities.copy_directory recreates files with the process defaults.
 // This wrapper additionally preserves Unix permission bits, including the
 // executable bits required by packaged programs and helper executables.
