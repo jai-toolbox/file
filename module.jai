@@ -1,6 +1,89 @@
 #import "Basic";
 #import "String";
 
+// File_Utilities.copy_directory recreates files with the process defaults.
+// This wrapper additionally preserves Unix permission bits, including the
+// executable bits required by packaged programs and helper executables.
+copy_directory :: (source: string, destination: string) -> bool {
+    if !File_Utilities.copy_directory(source, destination) return false;
+
+    #if OS_IS_UNIX {
+        Directory_Pair :: struct {
+            source: string;
+            destination: string;
+        }
+        Copy_Context :: struct {
+            source_root: string;
+            destination_root: string;
+            directories: [..] Directory_Pair;
+            success := true;
+        }
+
+        copy_context: Copy_Context;
+        copy_context.source_root = source;
+        copy_context.destination_root = destination;
+        copy_context.directories.allocator = temp;
+
+        visitor :: (info: *File_Utilities.File_Visit_Info, copy_context: *Copy_Context) {
+            if !copy_context.success return;
+
+            relative_name := advance(info.full_name, copy_context.source_root.count);
+            destination_name := tprint("%%", copy_context.destination_root, relative_name);
+            if info.is_directory {
+                array_add(*copy_context.directories, .{
+                    source = copy_temporary_string(info.full_name),
+                    destination = copy_temporary_string(destination_name),
+                });
+                return;
+            }
+
+            copy_context.success = copy_unix_permissions(info.full_name, destination_name);
+        }
+
+        visit_ok := File_Utilities.visit_files(
+            source,
+            recursive = true,
+            *copy_context,
+            visitor,
+            visit_directories = true,
+        );
+        if !visit_ok || !copy_context.success return false;
+
+        // Apply directory modes from the leaves upward so restrictive parent
+        // permissions cannot prevent us from reaching their children.
+        directory_index := copy_context.directories.count;
+        while directory_index > 0 {
+            directory_index -= 1;
+            pair := copy_context.directories[directory_index];
+            if !copy_unix_permissions(pair.source, pair.destination) return false;
+        }
+        if !copy_unix_permissions(source, destination) return false;
+    }
+
+    return true;
+}
+
+#if OS_IS_UNIX {
+    copy_unix_permissions :: (source: string, destination: string) -> bool {
+        source_status: POSIX.stat_t;
+        if POSIX.stat(temp_c_string(source), *source_status) != 0 {
+            log_error("Could not read Unix permissions from %.\n", source);
+            return false;
+        }
+
+        // Permission, set-id, and sticky bits; exclude the file-type bits.
+        permission_bits := source_status.st_mode & cast(POSIX.mode_t) 0xFFF;
+        if POSIX.chmod(temp_c_string(destination), permission_bits) != 0 {
+            log_error("Could not apply Unix permissions from % to %.\n", source, destination);
+            return false;
+        }
+        return true;
+    }
+}
+
+File_Utilities :: #import "File_Utilities";
+#if OS_IS_UNIX POSIX :: #import "POSIX";
+
 path_char_equal :: (a: u8, b: u8) -> bool {
     if a >= #char "A" && a <= #char "Z" a += #char "a" - #char "A";
     if b >= #char "A" && b <= #char "Z" b += #char "a" - #char "A";
